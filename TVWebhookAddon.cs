@@ -20,7 +20,7 @@ using NinjaTrader.NinjaScript;
 
 namespace NinjaTrader.NinjaScript.AddOns
 {
-    public class TVWebhookAddon : NTWindow, NinjaTrader.Gui.Tools.IInstantiatedOnLoad
+    public class TVWebhookAddon : AddOnBase
     {
         // ============ CONFIG ============
         // All settings live in:
@@ -84,9 +84,8 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             if (State == State.SetDefaults)
             {
-                Caption = "TV Webhook Listener";
-                Width   = 380;
-                Height  = 120;
+                Name = "TV Webhook Listener";
+                Description = "Receives TradingView webhooks and fans out to multiple accounts.";
             }
             else if (State == State.Active)
             {
@@ -127,7 +126,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void Stop()
         {
-            try { cts?.Cancel(); listener?.Stop(); } catch { }
+            try
+            {
+                if (cts != null) cts.Cancel();
+                if (listener != null) listener.Stop();
+            }
+            catch { }
         }
 
         private async Task Loop(CancellationToken token)
@@ -137,7 +141,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 try
                 {
                     var ctx = await listener.GetContextAsync();
-                    _ = Task.Run(() => Handle(ctx));
+                    Task.Run(() => Handle(ctx));
                 }
                 catch (Exception e)
                 {
@@ -232,8 +236,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 c.Acct.Submit(new[] { entry, slOrd, tpOrd });
                 c.InTrade = true;
 
-                // Auto-clear when entry + brackets all complete
-                Account ca = c.Acct; AccountCfg cfg = c;
+                // Auto-clear when position is flat
+                Account ca = c.Acct;
+                AccountCfg accCfg = c;
                 EventHandler<OrderEventArgs> handler = null;
                 handler = (s, e) =>
                 {
@@ -241,10 +246,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                         || e.Order.OrderState == OrderState.Cancelled
                         || e.Order.OrderState == OrderState.Rejected)
                     {
-                        if (ca.Positions.FirstOrDefault(p =>
-                                p.Instrument == instrument)?.Quantity == 0)
+                        var pos = ca.Positions.FirstOrDefault(p => p.Instrument == instrument);
+                        if (pos == null || pos.Quantity == 0)
                         {
-                            cfg.InTrade = false;
+                            accCfg.InTrade = false;
                             ca.OrderUpdate -= handler;
                         }
                     }
