@@ -23,26 +23,58 @@ namespace NinjaTrader.NinjaScript.AddOns
     public class TVWebhookAddon : NTWindow, NinjaTrader.Gui.Tools.IInstantiatedOnLoad
     {
         // ============ CONFIG ============
-        private const string LISTEN_PREFIX     = "http://+:5005/";   // run NT as admin to bind
-        private const string SECRET            = "wickflow_change_me";
-        private const string DEFAULT_INSTRUMENT = "GC 06-26";        // used if alert omits "symbol"
-
-        // Add one entry per account you want to copy to.
-        // qtyMultiplier scales the qty from the TV alert (e.g. 2 = double size).
-        private static readonly List<AccountCfg> ACCOUNTS = new List<AccountCfg>
-        {
-            new AccountCfg { Name = "Lucid-Funded-1", QtyMultiplier = 1 },
-            new AccountCfg { Name = "Lucid-Eval-1",   QtyMultiplier = 1 },
-            // new AccountCfg { Name = "Lucid-Funded-2", QtyMultiplier = 2 },
-        };
+        // All settings live in:
+        //   Documents\NinjaTrader 8\bin\Custom\AddOns\tvwebhook.json
+        // Edit that file and click "Reload Config" — no recompile needed.
+        private static readonly string CONFIG_PATH = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "NinjaTrader 8", "bin", "Custom", "AddOns", "tvwebhook.json");
         // =================================
 
         private class AccountCfg
         {
-            public string Name;
-            public int    QtyMultiplier;
+            public string Name { get; set; }
+            public int    QtyMultiplier { get; set; }
             public Account Acct;
             public bool InTrade;
+        }
+
+        private class Config
+        {
+            public string ListenPrefix { get; set; } = "http://+:5005/";
+            public string Secret { get; set; } = "change_me";
+            public string DefaultInstrument { get; set; } = "GC 06-26";
+            public List<AccountCfg> Accounts { get; set; } = new List<AccountCfg>();
+        }
+
+        private Config cfg = new Config();
+
+        private void LoadConfig()
+        {
+            if (!File.Exists(CONFIG_PATH))
+            {
+                // First run: write a template the user can edit.
+                var template = "{\n"
+                    + "  \"ListenPrefix\": \"http://+:5005/\",\n"
+                    + "  \"Secret\": \"wickflow_change_me\",\n"
+                    + "  \"DefaultInstrument\": \"GC 06-26\",\n"
+                    + "  \"Accounts\": [\n"
+                    + "    { \"Name\": \"Sim101\",          \"QtyMultiplier\": 1 },\n"
+                    + "    { \"Name\": \"Lucid-Funded-1\", \"QtyMultiplier\": 1 },\n"
+                    + "    { \"Name\": \"Lucid-Eval-1\",    \"QtyMultiplier\": 1 }\n"
+                    + "  ]\n"
+                    + "}\n";
+                File.WriteAllText(CONFIG_PATH, template);
+                NinjaTrader.Code.Output.Process(
+                    "[TVWebhook] wrote template config to " + CONFIG_PATH,
+                    PrintTo.OutputTab1);
+            }
+
+            var raw = File.ReadAllText(CONFIG_PATH);
+            cfg = new JavaScriptSerializer().Deserialize<Config>(raw);
+            NinjaTrader.Code.Output.Process(
+                "[TVWebhook] loaded " + cfg.Accounts.Count + " account(s) from config",
+                PrintTo.OutputTab1);
         }
 
         private HttpListener listener;
@@ -68,7 +100,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void Start()
         {
-            foreach (var c in ACCOUNTS)
+            LoadConfig();
+            foreach (var c in cfg.Accounts)
             {
                 c.Acct = Account.All.FirstOrDefault(a => a.Name == c.Name);
                 if (c.Acct == null)
@@ -78,7 +111,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             cts = new CancellationTokenSource();
             listener = new HttpListener();
-            listener.Prefixes.Add(LISTEN_PREFIX);
+            listener.Prefixes.Add(cfg.ListenPrefix);
             try { listener.Start(); }
             catch (Exception e)
             {
@@ -89,7 +122,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
             Task.Run(() => Loop(cts.Token));
             NinjaTrader.Code.Output.Process(
-                "[TVWebhook] listening on " + LISTEN_PREFIX, PrintTo.OutputTab1);
+                "[TVWebhook] listening on " + cfg.ListenPrefix, PrintTo.OutputTab1);
         }
 
         private void Stop()
@@ -126,15 +159,25 @@ namespace NinjaTrader.NinjaScript.AddOns
                 var json = new JavaScriptSerializer()
                     .Deserialize<Dictionary<string, object>>(body);
 
-                if (!json.ContainsKey("secret") || (string)json["secret"] != SECRET)
+                if (!json.ContainsKey("secret") || (string)json["secret"] != cfg.Secret)
                 { Reply(ctx, 401, "{\"error\":\"bad secret\"}"); return; }
+
+                // Allow runtime config reload via webhook
+                if (json.ContainsKey("action") && (string)json["action"] == "reload")
+                {
+                    LoadConfig();
+                    foreach (var c in cfg.Accounts)
+                        c.Acct = Account.All.FirstOrDefault(a => a.Name == c.Name);
+                    Reply(ctx, 200, "{\"status\":\"reloaded\"}");
+                    return;
+                }
 
                 string side   = (string)json["side"];                 // "Buy" | "Sell"
                 int    qty    = Convert.ToInt32(json.ContainsKey("qty") ? json["qty"] : 1);
                 double sl     = Convert.ToDouble(json["sl"]);
                 double tp     = Convert.ToDouble(json["tp"]);
                 string symbol = json.ContainsKey("symbol")
-                    ? (string)json["symbol"] : DEFAULT_INSTRUMENT;
+                    ? (string)json["symbol"] : cfg.DefaultInstrument;
 
                 Place(symbol, side, qty, sl, tp);
                 Reply(ctx, 200, "{\"status\":\"ok\"}");
@@ -159,7 +202,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 ? OrderAction.Buy : OrderAction.Sell;
             var opp    = action == OrderAction.Buy ? OrderAction.Sell : OrderAction.Buy;
 
-            foreach (var c in ACCOUNTS)
+            foreach (var c in cfg.Accounts)
             {
                 if (c.Acct == null) continue;
                 if (c.InTrade)
