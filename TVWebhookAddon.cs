@@ -23,9 +23,9 @@ namespace NinjaTrader.NinjaScript.AddOns
     public class TVWebhookAddon : NTWindow, NinjaTrader.Gui.Tools.IInstantiatedOnLoad
     {
         // ============ CONFIG ============
-        private const string LISTEN_PREFIX = "http://+:5005/";   // run NT as admin to bind
-        private const string SECRET        = "wickflow_change_me";
-        private const string INSTRUMENT    = "GC 06-26";         // NT format, not GCM5
+        private const string LISTEN_PREFIX     = "http://+:5005/";   // run NT as admin to bind
+        private const string SECRET            = "wickflow_change_me";
+        private const string DEFAULT_INSTRUMENT = "GC 06-26";        // used if alert omits "symbol"
 
         // Add one entry per account you want to copy to.
         // qtyMultiplier scales the qty from the TV alert (e.g. 2 = double size).
@@ -47,7 +47,6 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private HttpListener listener;
         private CancellationTokenSource cts;
-        private Instrument instrument;
 
         protected override void OnStateChange()
         {
@@ -76,7 +75,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                     NinjaTrader.Code.Output.Process(
                         "[TVWebhook] account not found: " + c.Name, PrintTo.OutputTab1);
             }
-            instrument = Instrument.GetInstrument(INSTRUMENT);
 
             cts = new CancellationTokenSource();
             listener = new HttpListener();
@@ -131,12 +129,14 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (!json.ContainsKey("secret") || (string)json["secret"] != SECRET)
                 { Reply(ctx, 401, "{\"error\":\"bad secret\"}"); return; }
 
-                string side = (string)json["side"];                 // "Buy" | "Sell"
-                int    qty  = Convert.ToInt32(json.ContainsKey("qty") ? json["qty"] : 1);
-                double sl   = Convert.ToDouble(json["sl"]);
-                double tp   = Convert.ToDouble(json["tp"]);
+                string side   = (string)json["side"];                 // "Buy" | "Sell"
+                int    qty    = Convert.ToInt32(json.ContainsKey("qty") ? json["qty"] : 1);
+                double sl     = Convert.ToDouble(json["sl"]);
+                double tp     = Convert.ToDouble(json["tp"]);
+                string symbol = json.ContainsKey("symbol")
+                    ? (string)json["symbol"] : DEFAULT_INSTRUMENT;
 
-                Place(side, qty, sl, tp);
+                Place(symbol, side, qty, sl, tp);
                 Reply(ctx, 200, "{\"status\":\"ok\"}");
             }
             catch (Exception e)
@@ -145,8 +145,16 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        private void Place(string side, int qty, double sl, double tp)
+        private void Place(string symbol, string side, int qty, double sl, double tp)
         {
+            var instrument = Instrument.GetInstrument(symbol);
+            if (instrument == null)
+            {
+                NinjaTrader.Code.Output.Process(
+                    "[TVWebhook] unknown instrument: " + symbol, PrintTo.OutputTab1);
+                return;
+            }
+
             var action = side.Equals("Buy", StringComparison.OrdinalIgnoreCase)
                 ? OrderAction.Buy : OrderAction.Sell;
             var opp    = action == OrderAction.Buy ? OrderAction.Sell : OrderAction.Buy;
